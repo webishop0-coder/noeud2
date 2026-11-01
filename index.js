@@ -1,61 +1,51 @@
 const http = require('http');
 const WebSocket = require('ws');
-const net = require('net');
 
 const PORT = process.env.PORT || 3000;
 const TARGET_ADDR = process.env.TARGET_ADDR || '15.235.60.159:443';
-const [TARGET_HOST, TARGET_PORT] = TARGET_ADDR.split(':');
+const TARGET_PATH = '/@abess237';
 
-// Création du serveur HTTP de base (exigé par Cloud Run)
+// Serveur HTTP simple pour le healthcheck de Google
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Optimized Proxy is running.\n');
+    res.end('Optimized Fast WS-to-WS Proxy is running.\n');
 });
 
-// Attachement du serveur WebSocket au serveur HTTP
-const wss = new WebSocket.Server({ 
-    server,
-    perMessageDeflate: {
-        zlibDeflateOptions: { chunkSize: 1024, memLevel: 7, level: 3 },
-        zlibInflateOptions: { chunkSize: 10 * 1024 },
-        clientNoContextTakeover: true,
-        serverNoContextTakeover: true,
-        serverMaxWindowBits: 10,
-        concurrencyLimit: 10,
-        threshold: 1024
-    }
-});
+// Options pour désactiver la compression (économise le CPU) et optimiser les buffers
+const wsOptions = {
+    perMessageDeflate: false, // CRUCIAL POUR LA VITESSE : ne pas recompresser le trafic chiffré
+    maxPayload: 100 * 1024 * 1024, // Autorise des paquets jusqu'à 100 Mo (utile pour les gros téléchargements)
+    skipUTF8Validation: true // Optimise la vitesse en ignorant la vérification de l'encodage (on transporte du binaire)
+};
 
-wss.on('connection', (ws) => {
-    // Connexion TCP vers ton VPS
-    const tcpSocket = new net.Socket();
-    
-    // OPTIMISATION CRUCIALE : Désactive l'algorithme de Nagle pour une latence minimale
-    tcpSocket.setNoDelay(true); 
+const wss = new WebSocket.Server({ server, ...wsOptions });
 
-    tcpSocket.connect(parseInt(TARGET_PORT), TARGET_HOST, () => {
-        // VPS -> Client
-        tcpSocket.on('data', (data) => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(data);
-            }
-        });
+wss.on('connection', (clientWs) => {
+    // Connexion au VPS
+    const targetUrl = `ws://${TARGET_ADDR}${TARGET_PATH}`;
+    const targetWs = new WebSocket(targetUrl, wsOptions);
+
+    // VPS -> Client
+    targetWs.on('message', (data) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(data, { binary: true });
+        }
     });
 
     // Client -> VPS
-    ws.on('message', (data) => {
-        if (!tcpSocket.destroyed) {
-            tcpSocket.write(data);
+    clientWs.on('message', (data) => {
+        if (targetWs.readyState === WebSocket.OPEN) {
+            targetWs.send(data, { binary: true });
         }
     });
 
     // Nettoyage des connexions
-    tcpSocket.on('error', () => ws.close());
-    tcpSocket.on('close', () => ws.close());
-    ws.on('close', () => tcpSocket.destroy());
-    ws.on('error', () => tcpSocket.destroy());
+    targetWs.on('error', () => clientWs.close());
+    targetWs.on('close', () => clientWs.close());
+    clientWs.on('close', () => targetWs.close());
+    clientWs.on('error', () => targetWs.close());
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Optimized proxy running on port ${PORT} -> targeting ${TARGET_ADDR}`);
+    console.log(`Ultra-Fast Proxy démarré sur le port ${PORT} -> ${TARGET_ADDR}`);
 });
